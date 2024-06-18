@@ -3,6 +3,8 @@ name = "opentelemetry-journald-logs-unofficial"
 version = "0.1.0"
 edition = "2021"
 keywords = ["opentelemetry", "journald", "logs", "tracing"]
+description = "OpenTelemetry logs exporter for journald - unofficial, experimental"
+license = "Apache-2.0"
 
 [dependencies]
 opentelemetry = {  version = "0.23" , features = ["logs"]}
