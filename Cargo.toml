@@ -1,9 +1,11 @@
 [package]
 name = "opentelemetry-journald-logs-unofficial"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 keywords = ["opentelemetry", "journald", "logs", "tracing"]
 description = "OpenTelemetry logs exporter for journald - unofficial, experimental"
+repository = "https://github.com/lalitb/opentelemetry-journald-logs-unofficial"
+homepage = "https://github.com/lalitb/opentelemetry-journald-logs-unofficial"
 license = "Apache-2.0"
 
 [dependencies]
