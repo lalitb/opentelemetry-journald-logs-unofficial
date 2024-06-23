@@ -13,18 +13,56 @@ extern "C" {
     fn sd_journal_sendv(iov: *const libc::iovec, n: libc::c_int) -> libc::c_int;
 }
 
+#[derive(Default)]
+pub struct JournaldLogExporterBuilder {
+    identifier: Option<String>,
+    message_size_limit: Option<usize>,
+    attribute_prefix: Option<String>,
+}
+
+impl JournaldLogExporterBuilder {
+    pub fn identifier(mut self, identifier: &str) -> Self {
+        self.identifier = Some(identifier.to_string());
+        self
+    }
+
+    pub fn message_size_limit(mut self, message_size_limit: usize) -> Self {
+        self.message_size_limit = Some(message_size_limit);
+        self
+    }
+
+    pub fn attribute_prefix(mut self, attribute_prefix: Option<String>) -> Self {
+        if let Some(prefix) = attribute_prefix {
+            self.attribute_prefix = Some(prefix.to_uppercase());
+        } else {
+            self.attribute_prefix = None;
+        }
+        self
+    }
+
+    pub fn build(self) -> Result<JournaldLogExporter, &'static str> {
+        let identifier = self.identifier.ok_or("Identifier is required")?;
+        let message_size_limit = self
+            .message_size_limit
+            .ok_or("Message size limit is required")?;
+        Ok(JournaldLogExporter {
+            identifier: CString::new(identifier).map_err(|_| "Invalid identifier")?,
+            message_size_limit,
+            attribute_prefix: self.attribute_prefix,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct JournaldLogExporter {
     identifier: CString,
     message_size_limit: usize,
+    attribute_prefix: Option<String>,
 }
 
 impl JournaldLogExporter {
-    pub fn new(identifier: &str, message_size_limit: usize) -> Self {
-        JournaldLogExporter {
-            identifier: CString::new(identifier).unwrap(),
-            message_size_limit,
-        }
+    pub fn builder() -> JournaldLogExporterBuilder {
+        JournaldLogExporterBuilder::default()
     }
 
     fn send_to_journald(&self, iovecs: &[libc::iovec]) -> Result<(), std::io::Error> {
@@ -78,7 +116,11 @@ impl JournaldLogExporter {
             for (key, value) in attr_list.iter() {
                 let key_str = sanitize_field_name(key.as_str());
                 let value_str = format_any_value(value);
-                let attribute_str = format!("{}={}", key_str, value_str);
+                let attribute_str = if let Some(ref prefix) = self.attribute_prefix {
+                    format!("{}{}={}", prefix, key_str, value_str)
+                } else {
+                    format!("{}={}", key_str, value_str)
+                };
                 let attribute = CString::new(attribute_str).unwrap();
                 iovecs.push(libc::iovec {
                     iov_base: attribute.as_ptr() as *mut c_void,

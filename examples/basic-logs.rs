@@ -7,7 +7,13 @@ use tracing::info;
 use tracing_subscriber::prelude::*;
 
 fn init_logger() -> LoggerProvider {
-    let exporter = JournaldLogExporter::new("opentelemetry-journal-exporter", 4 * 1024);
+    let exporter = JournaldLogExporter::builder()
+        .identifier("opentelemetry-journal-exporter")
+        .message_size_limit(4 * 1024)
+        .attribute_prefix(Some("OTEL_".to_string()))
+        .build()
+        .expect("Failed to build JournaldLogExporter");
+
     LoggerProvider::builder()
         .with_simple_exporter(exporter)
         .build()
@@ -18,7 +24,7 @@ fn main() {
     let layer = layer::OpenTelemetryTracingBridge::new(&logger_provider);
     tracing_subscriber::registry().with(layer).init();
 
-    // Generate a large message
+    // Generate a large message, this won't be logged (support to be added later)
     let large_message: String = "A".repeat(8000); // Adjust the size as needed
     info!(
         event_id = 1234,
