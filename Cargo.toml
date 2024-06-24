@@ -1,6 +1,6 @@
 [package]
 name = "opentelemetry-journald-logs-unofficial"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 keywords = ["opentelemetry", "journald", "logs", "tracing"]
 description = "OpenTelemetry logs exporter for journald - unofficial, experimental"
