@@ -1,13 +1,20 @@
+mod utils;
+
 use async_trait::async_trait;
 use libc::{c_int, c_void};
 use opentelemetry::logs::AnyValue;
 use std::ffi::CString;
 use std::fmt::Debug;
+use std::io::Write;
 
 use opentelemetry::logs::LogError;
 use opentelemetry_sdk::export::logs::{LogData, LogExporter};
 
+use crate::utils::utils::send_fd_journald;
+use crate::utils::utils::{create_sealable, seal_fully};
 use opentelemetry::logs::Severity;
+use std::io::Seek;
+use std::io::Read;
 
 extern "C" {
     fn sd_journal_sendv(iov: *const libc::iovec, n: libc::c_int) -> libc::c_int;
@@ -66,12 +73,53 @@ impl JournaldLogExporter {
     }
 
     fn send_to_journald(&self, iovecs: &[libc::iovec]) -> Result<(), std::io::Error> {
+        println!("Sending log to journald");
         let ret = unsafe { sd_journal_sendv(iovecs.as_ptr(), iovecs.len() as c_int) };
         if ret < 0 {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
         }
+    }
+
+    fn send_large_log_to_journald(&self, payload: &[u8]) -> Result<(), std::io::Error> {
+        println!("Sending large log to journald with payload size: {}", payload.len());
+        use std::os::unix::prelude::AsRawFd;
+    
+        // Create sealable memfd
+        let mut mem = create_sealable()?;
+        println!("Created sealable memfd: {:?}", mem);
+    
+        // Write payload to memfd
+        mem.write_all(payload)?;
+        println!("Wrote payload to memfd: {:?}", String::from_utf8_lossy(payload));
+    
+        // Verify content written to memfd
+        mem.flush()?;
+        let mut verify_buf = vec![0; payload.len()];
+        mem.seek(std::io::SeekFrom::Start(0))?;
+        mem.read_exact(&mut verify_buf)?;
+        println!("Verified content in memfd: {:?}", String::from_utf8_lossy(&verify_buf));
+    
+        // Seal memfd
+        seal_fully(mem.as_raw_fd())?;
+        println!("Sealed memfd");
+    
+        // Send fd to journald
+        let result = send_fd_journald(mem.as_raw_fd(), "/run/systemd/journal/socket");
+        println!("Sent fd to journald, result: {:?}", result);
+    
+        // Check to ensure the fd was sent
+        if let Err(e) = &result {
+            println!("Error sending fd to journald: {}", e);
+        } else {
+            println!("Successfully sent fd to journald");
+        }
+    
+        // Ensure the memfd is not prematurely closed
+        std::mem::forget(mem);
+    
+        result
     }
 
     fn send_log_to_journald(&self, log_data: &LogData) -> Result<(), std::io::Error> {
@@ -131,22 +179,22 @@ impl JournaldLogExporter {
         }
 
         let total_size: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
-        let size_exceeded = total_size > self.message_size_limit;
 
-        // Try to send to journald regardless of the size
-        let send_result = self.send_to_journald(&iovecs);
-
-        if size_exceeded {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Log message size {} exceeds the limit of {} bytes",
-                    total_size, self.message_size_limit
-                ),
-            ));
+        if total_size > self.message_size_limit {
+            // If size exceeds limit, try sending as large log
+            return self.send_large_log_to_journald(
+                &iovecs
+                    .iter()
+                    .flat_map(|iov| unsafe {
+                        std::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len)
+                    })
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            );
+        } else {
+            // Send normal log
+            self.send_to_journald(&iovecs)
         }
-
-        send_result
     }
 }
 
