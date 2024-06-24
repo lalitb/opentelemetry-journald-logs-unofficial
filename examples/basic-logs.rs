@@ -11,6 +11,7 @@ fn init_logger() -> LoggerProvider {
         .identifier("opentelemetry-journal-exporter")
         .message_size_limit(4 * 1024)
         .attribute_prefix(Some("OTEL_".to_string()))
+        .json_format(true) //uncomment to log in json format
         .build()
         .expect("Failed to build JournaldLogExporter");
 
@@ -24,13 +25,5 @@ fn main() {
     let layer = layer::OpenTelemetryTracingBridge::new(&logger_provider);
     tracing_subscriber::registry().with(layer).init();
 
-    // Generate a large message, this won't be logged (support to be added later)
-    let large_message: String = "A".repeat(8000); // Adjust the size as needed
-    info!(
-        event_id = 1234,
-        user_id = 5678,
-        "large message: {}",
-        large_message
-    );
-    info!(event_id = 1234, user_id = 5678, "small message");
+    info!(event_id = 1234, user_id = 5678, "my test message");
 }

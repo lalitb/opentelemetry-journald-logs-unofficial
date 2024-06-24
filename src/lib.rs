@@ -9,6 +9,9 @@ use opentelemetry_sdk::export::logs::{LogData, LogExporter};
 
 use opentelemetry::logs::Severity;
 
+#[cfg(feature = "json")]
+use serde::Serialize;
+
 extern "C" {
     fn sd_journal_sendv(iov: *const libc::iovec, n: libc::c_int) -> libc::c_int;
 }
@@ -18,6 +21,7 @@ pub struct JournaldLogExporterBuilder {
     identifier: Option<String>,
     message_size_limit: Option<usize>,
     attribute_prefix: Option<String>,
+    json_format: bool,
 }
 
 impl JournaldLogExporterBuilder {
@@ -40,6 +44,11 @@ impl JournaldLogExporterBuilder {
         self
     }
 
+    pub fn json_format(mut self, json_format: bool) -> Self {
+        self.json_format = json_format;
+        self
+    }
+
     pub fn build(self) -> Result<JournaldLogExporter, &'static str> {
         let identifier = self.identifier.ok_or("Identifier is required")?;
         let message_size_limit = self
@@ -49,6 +58,7 @@ impl JournaldLogExporterBuilder {
             identifier: CString::new(identifier).map_err(|_| "Invalid identifier")?,
             message_size_limit,
             attribute_prefix: self.attribute_prefix,
+            json_format: self.json_format,
         })
     }
 }
@@ -58,6 +68,7 @@ pub struct JournaldLogExporter {
     identifier: CString,
     message_size_limit: usize,
     attribute_prefix: Option<String>,
+    json_format: bool,
 }
 
 impl JournaldLogExporter {
@@ -86,17 +97,57 @@ impl JournaldLogExporter {
             iov_len: identifier_field.as_bytes().len(),
         });
         cstrings.push(identifier_field);
+        if self.json_format {
+            #[cfg(feature = "json")]
+            {
+                // Serialize message and attributes as JSON
+                let log_entry = LogEntry::from_log_data(log_data, self.attribute_prefix.clone());
+                let message_str = format!("MESSAGE={}", serde_json::to_string(&log_entry).unwrap());
+                let message = CString::new(message_str).unwrap();
+                iovecs.push(libc::iovec {
+                    iov_base: message.as_ptr() as *mut c_void,
+                    iov_len: message.as_bytes().len(),
+                });
+                cstrings.push(message);
+            }
+            #[cfg(not(feature = "json"))]
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "JSON format is not supported without the `json` feature",
+                ));
+            }
+        } else {
+            // Add the MESSAGE field
+            if let Some(body) = &log_data.record.body {
+                let formatted_body = format_any_value(body);
+                let message_str = format!("MESSAGE={}", formatted_body);
+                let message = CString::new(message_str).unwrap();
+                iovecs.push(libc::iovec {
+                    iov_base: message.as_ptr() as *mut c_void,
+                    iov_len: message.as_bytes().len(),
+                });
+                cstrings.push(message);
+            }
 
-        // Add the MESSAGE field
-        if let Some(body) = &log_data.record.body {
-            let formatted_body = format_any_value(body);
-            let message_str = format!("MESSAGE={}", formatted_body);
-            let message = CString::new(message_str).unwrap();
-            iovecs.push(libc::iovec {
-                iov_base: message.as_ptr() as *mut c_void,
-                iov_len: message.as_bytes().len(),
-            });
-            cstrings.push(message);
+            // Add other attributes
+            if let Some(attr_list) = &log_data.record.attributes {
+                for (key, value) in attr_list.iter() {
+                    let key_str = sanitize_field_name(key.as_str());
+                    let value_str = format_any_value(value);
+                    let attribute_str = if let Some(ref prefix) = self.attribute_prefix {
+                        format!("{}{}={}", prefix, key_str, value_str)
+                    } else {
+                        format!("{}={}", key_str, value_str)
+                    };
+                    let attribute = CString::new(attribute_str).unwrap();
+                    iovecs.push(libc::iovec {
+                        iov_base: attribute.as_ptr() as *mut c_void,
+                        iov_len: attribute.as_bytes().len(),
+                    });
+                    cstrings.push(attribute);
+                }
+            }
         }
 
         // Add the PRIORITY field
@@ -110,25 +161,6 @@ impl JournaldLogExporter {
             iov_len: priority.as_bytes().len(),
         });
         cstrings.push(priority);
-
-        // Add other attributes
-        if let Some(attr_list) = &log_data.record.attributes {
-            for (key, value) in attr_list.iter() {
-                let key_str = sanitize_field_name(key.as_str());
-                let value_str = format_any_value(value);
-                let attribute_str = if let Some(ref prefix) = self.attribute_prefix {
-                    format!("{}{}={}", prefix, key_str, value_str)
-                } else {
-                    format!("{}={}", key_str, value_str)
-                };
-                let attribute = CString::new(attribute_str).unwrap();
-                iovecs.push(libc::iovec {
-                    iov_base: attribute.as_ptr() as *mut c_void,
-                    iov_len: attribute.as_bytes().len(),
-                });
-                cstrings.push(attribute);
-            }
-        }
 
         let total_size: usize = iovecs.iter().map(|iov| iov.iov_len).sum();
         let size_exceeded = total_size > self.message_size_limit;
@@ -147,6 +179,45 @@ impl JournaldLogExporter {
         }
 
         send_result
+    }
+}
+
+#[cfg(feature = "json")]
+#[derive(Serialize)]
+struct LogEntry {
+    message: String,
+    #[serde(flatten)]
+    attributes: std::collections::HashMap<String, String>,
+}
+
+#[cfg(feature = "json")]
+impl LogEntry {
+    fn from_log_data(log_data: &LogData, attribute_prefix: Option<String>) -> Self {
+        let mut attributes = std::collections::HashMap::new();
+
+        if let Some(attr_list) = &log_data.record.attributes {
+            for (key, value) in attr_list.iter() {
+                let key_str = sanitize_field_name(key.as_str());
+                let value_str = format_any_value(value);
+                let attribute_key = if let Some(ref prefix) = attribute_prefix {
+                    format!("{}{}", prefix, key_str)
+                } else {
+                    key_str
+                };
+                attributes.insert(attribute_key, value_str);
+            }
+        }
+
+        let message = log_data
+            .record
+            .body
+            .as_ref()
+            .map_or_else(|| "".to_string(), |body| format_any_value(body));
+
+        LogEntry {
+            message,
+            attributes,
+        }
     }
 }
 
