@@ -8,6 +8,8 @@ use opentelemetry::logs::LogError;
 use opentelemetry_sdk::export::logs::{LogData, LogExporter};
 
 use opentelemetry::logs::Severity;
+
+#[cfg(feature = "json")]
 use serde::Serialize;
 
 extern "C" {
@@ -96,15 +98,25 @@ impl JournaldLogExporter {
         });
         cstrings.push(identifier_field);
         if self.json_format {
-            // Serialize message and attributes as JSON
-            let log_entry = LogEntry::from_log_data(log_data, self.attribute_prefix.clone());
-            let message_str = format!("MESSAGE={}", serde_json::to_string(&log_entry).unwrap());
-            let message = CString::new(message_str).unwrap();
-            iovecs.push(libc::iovec {
-                iov_base: message.as_ptr() as *mut c_void,
-                iov_len: message.as_bytes().len(),
-            });
-            cstrings.push(message);
+            #[cfg(feature = "json")]
+            {
+                // Serialize message and attributes as JSON
+                let log_entry = LogEntry::from_log_data(log_data, self.attribute_prefix.clone());
+                let message_str = format!("MESSAGE={}", serde_json::to_string(&log_entry).unwrap());
+                let message = CString::new(message_str).unwrap();
+                iovecs.push(libc::iovec {
+                    iov_base: message.as_ptr() as *mut c_void,
+                    iov_len: message.as_bytes().len(),
+                });
+                cstrings.push(message);
+            }
+            #[cfg(not(feature = "json"))]
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "JSON format is not supported without the `json` feature",
+                ));
+            }
         } else {
             // Add the MESSAGE field
             if let Some(body) = &log_data.record.body {
@@ -170,6 +182,7 @@ impl JournaldLogExporter {
     }
 }
 
+#[cfg(feature = "json")]
 #[derive(Serialize)]
 struct LogEntry {
     message: String,
@@ -177,6 +190,7 @@ struct LogEntry {
     attributes: std::collections::HashMap<String, String>,
 }
 
+#[cfg(feature = "json")]
 impl LogEntry {
     fn from_log_data(log_data: &LogData, attribute_prefix: Option<String>) -> Self {
         let mut attributes = std::collections::HashMap::new();
